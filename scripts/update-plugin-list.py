@@ -1,5 +1,6 @@
 # mypy: disallow-untyped-defs
 import datetime
+import os
 import pathlib
 import re
 from textwrap import dedent
@@ -9,6 +10,7 @@ from typing import Iterable
 from typing import Iterator
 from typing import TypedDict
 
+from github import Auth, Github, GithubException
 import packaging.version
 import platformdirs
 from requests_cache import CachedResponse
@@ -125,11 +127,14 @@ class PluginInfo(TypedDict):
     last_release: str
     status: str
     requires: str
+    github_stars: int
 
 
 def iter_plugins() -> Iterator[PluginInfo]:
     session = get_session()
     name_2_serial = pytest_plugin_projects_from_pypi(session)
+    auth = Auth.Token(os.getenv("GITHUB_TOKEN"))
+    g = Github(auth=auth)
 
     for name, last_serial in tqdm(name_2_serial.items(), smoothing=0):
         response = project_response_with_refresh(session, name, last_serial)
@@ -177,12 +182,28 @@ def iter_plugins() -> Iterator[PluginInfo]:
         summary = ""
         if info["summary"]:
             summary = escape_rst(info["summary"].replace("\n", ""))
+        github_stars = 0
+        project_urls = info["project_urls"]
+        if project_urls:
+            homepage = project_urls.get("Homepage")
+            if homepage and homepage.startswith("https://github.com/"):
+                repo_name = homepage[19:]
+                repo_name = repo_name.split("/")
+                if len(repo_name) >= 2:
+                    org, name = repo_name[0:2]
+                    try:
+                        repo = g.get_repo(f"{org}/{name}")
+                        if repo:
+                            github_stars = repo.stargazers_count
+                    except GithubException:
+                        pass
         yield {
             "name": name,
             "summary": summary.strip(),
             "last_release": last_release,
             "status": status,
             "requires": requires,
+            "github_stars": github_stars,
         }
 
 
@@ -213,7 +234,7 @@ def main() -> None:
         f.write(".. only:: not latex\n\n")
 
         _ = wcwidth  # reference library that must exist for tabulate to work
-        plugin_table = tabulate.tabulate(plugins, headers="keys", tablefmt="rst")
+        plugin_table = tabulate.tabulate(sorted(plugins, key=lambda p: p["github_stars"], reverse=True), headers="keys", tablefmt="rst")
         f.write(indent(plugin_table, "   "))
         f.write("\n\n")
 
